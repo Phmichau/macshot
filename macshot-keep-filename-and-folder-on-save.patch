@@ -1,0 +1,176 @@
+diff --git a/macshot/AppDelegate.swift b/macshot/AppDelegate.swift
+index 007efd2..4feb556 100644
+--- a/macshot/AppDelegate.swift
++++ b/macshot/AppDelegate.swift
+@@ -2195,7 +2195,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
+         } else {
+             return
+         }
+-        DetachedEditorWindowController.open(image: image)
++        DetachedEditorWindowController.open(image: image, sourceURL: url)
+     }
+ 
+     /// Open a history entry in the editor by its id, restoring editable annotations when
+diff --git a/macshot/Services/ImageSaveService.swift b/macshot/Services/ImageSaveService.swift
+index ca701f7..0beac1a 100644
+--- a/macshot/Services/ImageSaveService.swift
++++ b/macshot/Services/ImageSaveService.swift
+@@ -34,6 +34,7 @@ enum ImageSaveService {
+     static func save(
+         _ image: NSImage,
+         using action: SaveActionPreference = .current,
++        suggestedFilename: String? = nil,
+         windowTitle: String? = nil,
+         panelLevel: NSWindow.Level? = nil,
+         sheetWindow: NSWindow? = nil,
+@@ -44,6 +45,7 @@ enum ImageSaveService {
+         case .saveToFolder:
+             saveToConfiguredFolder(
+                 image,
++                suggestedFilename: suggestedFilename,
+                 windowTitle: windowTitle,
+                 panelLevel: panelLevel,
+                 sheetWindow: sheetWindow,
+@@ -52,6 +54,7 @@ enum ImageSaveService {
+         case .askWhereToSave:
+             showSavePanel(
+                 for: image,
++                suggestedFilename: suggestedFilename,
+                 windowTitle: windowTitle,
+                 panelLevel: panelLevel,
+                 sheetWindow: sheetWindow,
+@@ -62,13 +65,14 @@ enum ImageSaveService {
+ 
+     static func saveToConfiguredFolder(
+         _ image: NSImage,
++        suggestedFilename: String? = nil,
+         windowTitle: String? = nil,
+         panelLevel: NSWindow.Level? = nil,
+         sheetWindow: NSWindow? = nil,
+         activateApp: Bool = true,
+         completion: Completion? = nil
+     ) {
+-        let filename = defaultFilename(windowTitle: windowTitle)
++        let filename = suggestedFilename ?? defaultFilename(windowTitle: windowTitle)
+         if let dirURL = SaveDirectoryAccess.resolveIfAccessible() {
+             writeImage(image, toDirectory: dirURL, filename: filename, securityScoped: true, completion: completion)
+             return
+@@ -86,6 +90,7 @@ enum ImageSaveService {
+     static func showSavePanel(
+         for image: NSImage,
+         suggestedFilename: String? = nil,
++        suggestedDirectory: URL? = nil,
+         windowTitle: String? = nil,
+         panelLevel: NSWindow.Level? = nil,
+         sheetWindow: NSWindow? = nil,
+@@ -95,7 +100,7 @@ enum ImageSaveService {
+         let panel = NSSavePanel()
+         panel.allowedContentTypes = [ImageEncoder.utType]
+         panel.nameFieldStringValue = suggestedFilename ?? defaultFilename(windowTitle: windowTitle)
+-        panel.directoryURL = SaveDirectoryAccess.directoryHint()
++        panel.directoryURL = suggestedDirectory ?? SaveDirectoryAccess.directoryHint()
+         panel.canCreateDirectories = true
+         panel.isExtensionHidden = false
+         if let panelLevel {
+@@ -123,6 +128,34 @@ enum ImageSaveService {
+         presentPanel(panel, sheetWindow: sheetWindow, activateApp: activateApp, completionHandler: handler)
+     }
+ 
++    /// Overwrites the exact file at `url` — used when re-saving a file that was
++    /// opened into the editor from disk, so Save / Quick Save write back to the
++    /// same folder and filename it came from instead of the app's configured
++    /// default screenshot folder.
++    static func overwrite(
++        _ image: NSImage,
++        at url: URL,
++        completion: Completion? = nil
++    ) {
++        DispatchQueue.global(qos: .userInitiated).async {
++            let accessing = url.startAccessingSecurityScopedResource()
++            defer { if accessing { url.stopAccessingSecurityScopedResource() } }
++            guard let imageData = ImageEncoder.encode(image) else {
++                completionOnMain(completion, false)
++                return
++            }
++            do {
++                try imageData.write(to: url)
++                completionOnMain(completion, true)
++            } catch {
++                #if DEBUG
++                NSLog("macshot: failed to overwrite \(url.path): \(error.localizedDescription)")
++                #endif
++                completionOnMain(completion, false)
++            }
++        }
++    }
++
+     private static func defaultFilename(windowTitle: String?) -> String {
+         let template = UserDefaults.standard.string(forKey: FilenameFormatter.userDefaultsKey) ?? FilenameFormatter.defaultTemplate
+         let base = FilenameFormatter.format(template: template, windowTitle: windowTitle)
+diff --git a/macshot/UI/Editor/DetachedEditorWindowController.swift b/macshot/UI/Editor/DetachedEditorWindowController.swift
+index bf90610..9159646 100644
+--- a/macshot/UI/Editor/DetachedEditorWindowController.swift
++++ b/macshot/UI/Editor/DetachedEditorWindowController.swift
+@@ -45,6 +45,10 @@ class DetachedEditorWindowController: NSObject, NSWindowDelegate {
+     /// When true, force beautify off on open (image already has beautify baked in).
+     private var disableBeautifyOnOpen: Bool = false
+     private var initialEditState: CaptureEditState?
++    /// The file this image was opened from (via "Open Image…" or Finder/drag),
++    /// if any. Used to suggest the original filename when saving, instead of
++    /// always falling back to the default timestamp-based name.
++    private var sourceURL: URL?
+ 
+     /// Open an editor window with the given image (typically from captureSelectedRegion).
+     /// When `disableBeautify` is true, beautify starts off regardless of UserDefaults
+@@ -57,11 +61,12 @@ class DetachedEditorWindowController: NSObject, NSWindowDelegate {
+     /// here: writing `view.currentTool = .arrow` triggers the didSet that
+     /// persists "arrow" globally, wiping the user's last-tool memory across
+     /// the whole app.
+-    static func open(image: NSImage, tool: AnnotationTool? = nil, color: NSColor? = nil, strokeWidth: CGFloat? = nil, annotations: [Annotation] = [], historyEntryID: String? = nil, fromCapture: Bool = false, disableBeautify: Bool = false, editState: CaptureEditState? = nil) {
++    static func open(image: NSImage, tool: AnnotationTool? = nil, color: NSColor? = nil, strokeWidth: CGFloat? = nil, annotations: [Annotation] = [], historyEntryID: String? = nil, fromCapture: Bool = false, disableBeautify: Bool = false, editState: CaptureEditState? = nil, sourceURL: URL? = nil) {
+         let controller = DetachedEditorWindowController()
+         controller.historyEntryID = historyEntryID
+         controller.disableBeautifyOnOpen = disableBeautify
+         controller.initialEditState = editState
++        controller.sourceURL = sourceURL
+         // Only warn about unsaved capture if the image came from a live capture (not a file on disk)
+         controller.screenshotNeverOutput = fromCapture && historyEntryID == nil
+         controller.show(image: image, tool: tool, color: color, strokeWidth: strokeWidth, annotations: annotations)
+@@ -428,7 +433,7 @@ extension DetachedEditorWindowController: OverlayViewDelegate {
+         guard let view = overlayView,
+               let raw = view.captureSelectedRegion() else { return }
+         let image = applyPostProcessing(raw)
+-        ImageSaveService.showSavePanel(for: image, sheetWindow: window) { [weak self] success in
++        ImageSaveService.showSavePanel(for: image, suggestedFilename: sourceURL?.lastPathComponent, suggestedDirectory: sourceURL?.deletingLastPathComponent(), sheetWindow: window) { [weak self] success in
+             if success {
+                 self?.playCopySound()
+                 self?.autoSaveToHistoryIfNeeded(compositedImage: image)
+@@ -486,7 +491,11 @@ extension DetachedEditorWindowController: OverlayViewDelegate {
+             ImageEncoder.copyToClipboard(image)
+         }
+         if mode == 0 || mode == 2 {
+-            ImageSaveService.saveToConfiguredFolder(image, sheetWindow: window)
++            if let sourceURL {
++                ImageSaveService.overwrite(image, at: sourceURL)
++            } else {
++                ImageSaveService.saveToConfiguredFolder(image, sheetWindow: window)
++            }
+         }
+         let annotationData = currentAnnotationData()
+         playCopySound()
+@@ -497,6 +506,15 @@ extension DetachedEditorWindowController: OverlayViewDelegate {
+     func overlayViewDidRequestFileSave() {
+         guard let raw = overlayView?.captureSelectedRegion() else { return }
+         let image = applyPostProcessing(raw)
++        if let sourceURL {
++            ImageSaveService.overwrite(image, at: sourceURL) { [weak self] success in
++                if success {
++                    self?.playCopySound()
++                    self?.autoSaveToHistoryIfNeeded(compositedImage: image)
++                }
++            }
++            return
++        }
+         ImageSaveService.saveToConfiguredFolder(image, sheetWindow: window) { [weak self] success in
+             if success {
+                 self?.playCopySound()

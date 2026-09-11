@@ -45,6 +45,10 @@ class DetachedEditorWindowController: NSObject, NSWindowDelegate {
     /// When true, force beautify off on open (image already has beautify baked in).
     private var disableBeautifyOnOpen: Bool = false
     private var initialEditState: CaptureEditState?
+    /// The file this image was opened from (via "Open Image…" or Finder/drag),
+    /// if any. Used to suggest the original filename when saving, instead of
+    /// always falling back to the default timestamp-based name.
+    private var sourceURL: URL?
 
     /// Open an editor window with the given image (typically from captureSelectedRegion).
     /// When `disableBeautify` is true, beautify starts off regardless of UserDefaults
@@ -57,11 +61,12 @@ class DetachedEditorWindowController: NSObject, NSWindowDelegate {
     /// here: writing `view.currentTool = .arrow` triggers the didSet that
     /// persists "arrow" globally, wiping the user's last-tool memory across
     /// the whole app.
-    static func open(image: NSImage, tool: AnnotationTool? = nil, color: NSColor? = nil, strokeWidth: CGFloat? = nil, annotations: [Annotation] = [], historyEntryID: String? = nil, fromCapture: Bool = false, disableBeautify: Bool = false, editState: CaptureEditState? = nil) {
+    static func open(image: NSImage, tool: AnnotationTool? = nil, color: NSColor? = nil, strokeWidth: CGFloat? = nil, annotations: [Annotation] = [], historyEntryID: String? = nil, fromCapture: Bool = false, disableBeautify: Bool = false, editState: CaptureEditState? = nil, sourceURL: URL? = nil) {
         let controller = DetachedEditorWindowController()
         controller.historyEntryID = historyEntryID
         controller.disableBeautifyOnOpen = disableBeautify
         controller.initialEditState = editState
+        controller.sourceURL = sourceURL
         // Only warn about unsaved capture if the image came from a live capture (not a file on disk)
         controller.screenshotNeverOutput = fromCapture && historyEntryID == nil
         controller.show(image: image, tool: tool, color: color, strokeWidth: strokeWidth, annotations: annotations)
@@ -428,7 +433,7 @@ extension DetachedEditorWindowController: OverlayViewDelegate {
         guard let view = overlayView,
               let raw = view.captureSelectedRegion() else { return }
         let image = applyPostProcessing(raw)
-        ImageSaveService.showSavePanel(for: image, sheetWindow: window) { [weak self] success in
+        ImageSaveService.showSavePanel(for: image, suggestedFilename: sourceURL?.lastPathComponent, suggestedDirectory: sourceURL?.deletingLastPathComponent(), sheetWindow: window) { [weak self] success in
             if success {
                 self?.playCopySound()
                 self?.autoSaveToHistoryIfNeeded(compositedImage: image)
@@ -486,7 +491,11 @@ extension DetachedEditorWindowController: OverlayViewDelegate {
             ImageEncoder.copyToClipboard(image)
         }
         if mode == 0 || mode == 2 {
-            ImageSaveService.saveToConfiguredFolder(image, sheetWindow: window)
+            if let sourceURL {
+                ImageSaveService.overwrite(image, at: sourceURL)
+            } else {
+                ImageSaveService.saveToConfiguredFolder(image, sheetWindow: window)
+            }
         }
         let annotationData = currentAnnotationData()
         playCopySound()
@@ -497,6 +506,15 @@ extension DetachedEditorWindowController: OverlayViewDelegate {
     func overlayViewDidRequestFileSave() {
         guard let raw = overlayView?.captureSelectedRegion() else { return }
         let image = applyPostProcessing(raw)
+        if let sourceURL {
+            ImageSaveService.overwrite(image, at: sourceURL) { [weak self] success in
+                if success {
+                    self?.playCopySound()
+                    self?.autoSaveToHistoryIfNeeded(compositedImage: image)
+                }
+            }
+            return
+        }
         ImageSaveService.saveToConfiguredFolder(image, sheetWindow: window) { [weak self] success in
             if success {
                 self?.playCopySound()

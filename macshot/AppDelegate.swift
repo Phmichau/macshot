@@ -2195,7 +2195,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         } else {
             return
         }
-        DetachedEditorWindowController.open(image: image)
+        DetachedEditorWindowController.open(image: image, sourceURL: url)
     }
 
     /// Open a history entry in the editor by its id, restoring editable annotations when

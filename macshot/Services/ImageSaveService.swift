@@ -34,6 +34,7 @@ enum ImageSaveService {
     static func save(
         _ image: NSImage,
         using action: SaveActionPreference = .current,
+        suggestedFilename: String? = nil,
         windowTitle: String? = nil,
         panelLevel: NSWindow.Level? = nil,
         sheetWindow: NSWindow? = nil,
@@ -44,6 +45,7 @@ enum ImageSaveService {
         case .saveToFolder:
             saveToConfiguredFolder(
                 image,
+                suggestedFilename: suggestedFilename,
                 windowTitle: windowTitle,
                 panelLevel: panelLevel,
                 sheetWindow: sheetWindow,
@@ -52,6 +54,7 @@ enum ImageSaveService {
         case .askWhereToSave:
             showSavePanel(
                 for: image,
+                suggestedFilename: suggestedFilename,
                 windowTitle: windowTitle,
                 panelLevel: panelLevel,
                 sheetWindow: sheetWindow,
@@ -62,13 +65,14 @@ enum ImageSaveService {
 
     static func saveToConfiguredFolder(
         _ image: NSImage,
+        suggestedFilename: String? = nil,
         windowTitle: String? = nil,
         panelLevel: NSWindow.Level? = nil,
         sheetWindow: NSWindow? = nil,
         activateApp: Bool = true,
         completion: Completion? = nil
     ) {
-        let filename = defaultFilename(windowTitle: windowTitle)
+        let filename = suggestedFilename ?? defaultFilename(windowTitle: windowTitle)
         if let dirURL = SaveDirectoryAccess.resolveIfAccessible() {
             writeImage(image, toDirectory: dirURL, filename: filename, securityScoped: true, completion: completion)
             return
@@ -86,6 +90,7 @@ enum ImageSaveService {
     static func showSavePanel(
         for image: NSImage,
         suggestedFilename: String? = nil,
+        suggestedDirectory: URL? = nil,
         windowTitle: String? = nil,
         panelLevel: NSWindow.Level? = nil,
         sheetWindow: NSWindow? = nil,
@@ -95,7 +100,7 @@ enum ImageSaveService {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [ImageEncoder.utType]
         panel.nameFieldStringValue = suggestedFilename ?? defaultFilename(windowTitle: windowTitle)
-        panel.directoryURL = SaveDirectoryAccess.directoryHint()
+        panel.directoryURL = suggestedDirectory ?? SaveDirectoryAccess.directoryHint()
         panel.canCreateDirectories = true
         panel.isExtensionHidden = false
         if let panelLevel {
@@ -121,6 +126,34 @@ enum ImageSaveService {
         }
 
         presentPanel(panel, sheetWindow: sheetWindow, activateApp: activateApp, completionHandler: handler)
+    }
+
+    /// Overwrites the exact file at `url` — used when re-saving a file that was
+    /// opened into the editor from disk, so Save / Quick Save write back to the
+    /// same folder and filename it came from instead of the app's configured
+    /// default screenshot folder.
+    static func overwrite(
+        _ image: NSImage,
+        at url: URL,
+        completion: Completion? = nil
+    ) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let accessing = url.startAccessingSecurityScopedResource()
+            defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+            guard let imageData = ImageEncoder.encode(image) else {
+                completionOnMain(completion, false)
+                return
+            }
+            do {
+                try imageData.write(to: url)
+                completionOnMain(completion, true)
+            } catch {
+                #if DEBUG
+                NSLog("macshot: failed to overwrite \(url.path): \(error.localizedDescription)")
+                #endif
+                completionOnMain(completion, false)
+            }
+        }
     }
 
     private static func defaultFilename(windowTitle: String?) -> String {
